@@ -24,23 +24,20 @@
 #define APK_SIG_SCHEME_V31_BLOCK_ID 0x1b93ad61u
 #define APK_CERT_MAX_LENGTH 4096
 
+/* Aster fork: only trust the Aster manager (me.yuki.aster). Upstream APatch
+ * (me.bmax.apatch) and the demo package are intentionally NOT trusted: the LKM crowns
+ * the FIRST base.apk in /data/app that matches any entry, so keeping upstream entries
+ * here lets an installed APatch shadow Aster and take over manager authority (Aster
+ * then gets no root). The digest is the SHA-256 of the signing certificate in the
+ * APK's v2 block. */
 const struct kp_trusted_manager kp_trusted_managers[] = {
 	{
-		.package = "me.bmax.apatch",
+		.package = "me.yuki.aster",
 		.digest = {
-			0xd7, 0x1d, 0xad, 0xc0, 0xca, 0x07, 0xbd, 0xf5,
-			0x94, 0x38, 0x3b, 0xfb, 0x2a, 0x44, 0x51, 0x34,
-			0xa0, 0x73, 0x39, 0xf1, 0x2a, 0x27, 0x04, 0x4a,
-			0x1b, 0x32, 0x69, 0x81, 0xac, 0xf5, 0xf3, 0x19,
-		},
-	},
-	{
-		.package = "com.example.apatch",
-		.digest = {
-			0xe5, 0x11, 0x33, 0x12, 0x5f, 0xef, 0x56, 0xaa,
-			0x52, 0x83, 0x91, 0xfc, 0xc2, 0x04, 0x94, 0xeb,
-			0xb5, 0x38, 0xbd, 0x8e, 0x09, 0x3d, 0x6c, 0x47,
-			0x5d, 0x6d, 0x00, 0x2a, 0x7a, 0x12, 0x1a, 0x8f,
+		0xfa, 0xa5, 0x48, 0x73, 0x57, 0xaa, 0xcf, 0x85,
+		0xcd, 0x18, 0xb1, 0xf0, 0xc6, 0x56, 0x86, 0x6e,
+		0xc6, 0xc1, 0xc9, 0x06, 0x97, 0xe4, 0x6a, 0xbc,
+		0xa2, 0xb4, 0x0f, 0x7a, 0xd0, 0xd1, 0xcc, 0x47
 		},
 	},
 	{ .package = NULL, .digest = { 0 } },
@@ -311,9 +308,12 @@ static int apk_matches_digest(const char *path, const u8 *expected)
 		goto out;
 	}
 
+	/* The manager APK is signed v2+v3, and the certificate this trusts is the one in
+	 * the v2 block, so v3 beside it no longer disqualifies the APK. v1 still does: it
+	 * is a scheme nothing here needs. */
 	if (v3_blocks || v31_blocks) {
-		logkd("apk unexpected v3/v3.1 signature scheme alongside v2\n");
-		goto out;
+		logkd("apk carries v3/v3.1 as well (v3=%d/%d v31=%d/%d); trusting the v2 block\n",
+		      v3_valid, v3_blocks, v31_valid, v31_blocks);
 	}
 
 	if (!v2_valid) {

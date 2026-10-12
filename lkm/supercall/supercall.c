@@ -33,7 +33,13 @@ static long kp_supercall_handler(const struct pt_regs *regs)
 
 	/* The manager may grant/revoke allowlist entries; an already-allowed uid
 	 * may use the SU supercalls. Anything else is a plain truncate() call. */
-	bool manager = kp_is_manager_uid(uid);
+	/* Aster: the LKM has no superkey, so the uid-0 daemon (apd) is trusted as
+	 * an administrator too. Otherwise the su-allow gate above lets apd in but
+	 * kp_supercall_allowed_for_su() then rejects grant/revoke, kstorage writes
+	 * and the su-path reset, so allowlist and module-exclude changes would not
+	 * take effect until the module is reloaded. kpimg keeps its key-based
+	 * check untouched. */
+	bool manager = kp_is_manager_uid(uid) || uid == 0;
 	if (!manager && !kp_is_su_allow_uid(uid)) {
 		logkd("supercall: uid %u not authorized (manager?%d allow?%d)\n", uid,
 		      kp_is_manager_uid(uid), kp_is_su_allow_uid(uid));

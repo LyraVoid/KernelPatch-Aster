@@ -22,6 +22,17 @@
 #include <userd.h>
 #endif
 
+/*
+ * Size of the heap-allocated supercmd buffers. These used to be 4 KiB
+ * automatic arrays, which put ~9 KiB of stack frame under the execve
+ * pre-hook chain (handle_supercmd 5056 B + supercmd_echo 4288 B). See
+ * https://github.com/bmax121/KernelPatch/issues/323
+ */
+#define SUPERCMD_BUF_LEN 4096
+
+/* GFP_KERNEL: __GFP_RECLAIM | __GFP_IO | __GFP_FS */
+#define SUPERCMD_GFP_KERNEL 0xcc0u
+
 static char *__user supercmd_str_to_user_sp(const char *data, uintptr_t *sp)
 {
     int len = strlen(data) + 1;
@@ -45,14 +56,23 @@ static void supercmd_echo(char **__user u_filename_p, char **__user uargv, uintp
 {
     supercmd_exec(u_filename_p, ECHO_PATH, sp);
 
-    char buffer[4096];
+    /*
+     * Heap-allocate the format buffer: this runs inside the execve pre-hook,
+     * where the page fault below (set_user_arg_ptr -> copy_to_user -> COW)
+     * already needs a large part of the 16 KiB kernel stack.
+     */
+    char *buffer = kmalloc(SUPERCMD_BUF_LEN, SUPERCMD_GFP_KERNEL);
+    if (!buffer) return;
+
     va_list va;
     va_start(va, fmt);
-    vsnprintf(buffer, sizeof(buffer), fmt, va);
+    vsnprintf(buffer, SUPERCMD_BUF_LEN, fmt, va);
     va_end(va);
 
     const char *__user cmd = supercmd_str_to_user_sp(ECHO_PATH, sp);
     const char *__user argv1 = supercmd_str_to_user_sp(buffer, sp);
+    /* The string has been copied to the user stack above. */
+    kfree(buffer);
 
     set_user_arg_ptr(0, *uargv, 0, (uintptr_t)cmd);
     set_user_arg_ptr(0, *uargv, 1, (uintptr_t)argv1);
@@ -337,6 +357,8 @@ static void handle_cmd_key_auth(char **__user u_filename_p, const char *cmd, con
 
 void handle_supercmd(char **__user u_filename_p, char **__user uargv)
 {
+    /* Declared here so every early return and the shared free path stay safe. */
+    char *buffer = NULL;
     int is_key_auth = 0;
     int is_trusted_manager = 0;
     is_trusted_manager = is_trusted_manager_uid(current_uid());
@@ -438,7 +460,11 @@ void handle_supercmd(char **__user u_filename_p, char **__user uargv)
 
     struct cmd_res cmd_res = { 0 };
 
-    char buffer[4096];
+    buffer = kmalloc(SUPERCMD_BUF_LEN, SUPERCMD_GFP_KERNEL);
+    if (!buffer) {
+        cmd_res.err_msg = "out of memory";
+        goto echo;
+    }
     buffer[0] = '\0';
 
     // command
@@ -494,7 +520,7 @@ void handle_supercmd(char **__user u_filename_p, char **__user uargv)
         goto echo;
     #endif
     } else if (!strcmp("sumgr", cmd)) {
-        handle_cmd_sumgr(u_filename_p, carr, buffer, sizeof(buffer), &cmd_res);
+        handle_cmd_sumgr(u_filename_p, carr, buffer, SUPERCMD_BUF_LEN, &cmd_res);
     } else if (!strcmp("event", cmd)) {
         if (carr[1]) {
             cmd_res.rc = report_user_event(carr[1], carr[2]);
@@ -510,7 +536,7 @@ void handle_supercmd(char **__user u_filename_p, char **__user uargv)
         cmd_res.msg = "test done...";
     } else {
         if (is_key_auth) {
-            handle_cmd_key_auth(u_filename_p, cmd, carr, buffer, sizeof(buffer), &cmd_res);
+            handle_cmd_key_auth(u_filename_p, cmd, carr, buffer, SUPERCMD_BUF_LEN, &cmd_res);
         } else {
             cmd_res.err_msg = "invalid command or a superkey is required";
         }
@@ -522,6 +548,7 @@ echo:
     if (cmd_res.err_msg) supercmd_echo(u_filename_p, uargv, &sp, "supercmd error message: %s", cmd_res.err_msg);
 
 free:
+    if (buffer) kfree(buffer);
     // free args
     for (int i = 2; i < sizeof(parr) / sizeof(parr[0]); i++) {
         const char *a = parr[i];
